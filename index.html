@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Build Doctor</title>
+<style>
+:root{--bg:#E8EDF4;--ink:#14202E;--mute:#52627A;--card:#fff;--fail:#C2362B;--ok:#1F7A4D;--hi:#FFE08A;--line:#C9D3E0}
+@media(prefers-color-scheme:dark){:root{--bg:#101822;--ink:#E7EDF5;--mute:#9AABC2;--card:#18232F;--fail:#FF7A6E;--ok:#5FD39A;--hi:#5A4A10;--line:#2A3A4D}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:24px 16px}
+h1{font-size:2rem;margin:0}p.sub{color:var(--mute);margin:4px 0 20px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+label{font-weight:600;display:block;margin-bottom:6px}
+select,textarea,button{font:inherit;color:inherit;border:1px solid var(--line);border-radius:8px;background:var(--card);padding:8px 10px;width:100%}
+textarea{height:230px;font:13px/1.5 ui-monospace,Consolas,monospace;margin-top:10px;resize:vertical}
+.row{display:flex;gap:8px;margin-top:10px}button{cursor:pointer;width:auto;flex:1;font-weight:600}
+button.go{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+pre{margin:0;font:13px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;overflow-x:auto}
+#logview{margin-top:10px;max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px}
+.bad{background:var(--hi);display:block;border-left:4px solid var(--fail);padding-left:6px}
+.say{color:var(--mute);font-style:italic;min-height:1.5em}
+h2{font-size:1rem;margin:14px 0 4px}h2:first-of-type{margin-top:0}
+.fix{border-left:4px solid var(--ok);padding-left:10px}.cause{border-left:4px solid var(--fail);padding-left:10px}
+</style></head><body><main>
+<h1>Build Doctor</h1>
+<p class="sub">Ask why your build failed. Get the cause and the fix, spoken and on screen.</p>
+<div class="grid">
+<section class="card">
+<label for="sample">Failed build log</label>
+<select id="sample"></select>
+<textarea id="log" aria-label="Paste your failed build log here" placeholder="Paste a failed GitHub Actions log here"></textarea>
+<div class="row"><button id="mic">Ask by voice</button><button class="go" id="ask">Why did it fail?</button></div>
+<div id="logview" hidden><pre id="logpre"></pre></div>
+</section>
+<section class="card" aria-live="polite">
+<div class="say" id="say">Say or tap: “Why did my build fail?”</div>
+<div id="out"><p>Pick a sample log or paste your own, then ask.</p></div>
+<div class="row"><button id="speak" hidden>Read aloud</button></div>
+</section></div></main>
+<script>
+const SAMPLES={
+"Python: missing module":`Run pytest\n============ test session starts ============\ncollected 0 items / 1 error\nImportError while importing tests/test_api.py\nE   ModuleNotFoundError: No module named 'requests'\nError: Process completed with exit code 2.`,
+"Node: missing build script":`Run npm run build\nnpm ERR! Missing script: "build"\nnpm ERR! To see a list of scripts, run: npm run\nError: Process completed with exit code 1.`,
+"Test: wrong total":`Run npm test\nFAIL tests/cart.test.js\n  ● cart total adds items\n    expect(received).toBe(expected)\n    Expected: 5\n    Received: 4\n      at Object.<anonymous> (tests/cart.test.js:12:30)\nError: Process completed with exit code 1.`};
+const RULES=[
+[/ModuleNotFoundError: No module named '(\w+)'/,m=>({line:m[0],cause:`The code imports "${m[1]}" but the build never installed it.`,fix:`Add ${m[1]} to requirements.txt, then make sure the workflow runs: pip install -r requirements.txt`})],
+[/Missing script: "(\w+)"/,m=>({line:m[0],cause:`package.json has no "${m[1]}" script, so npm cannot run it.`,fix:`Add it under "scripts" in package.json, for example:\n"scripts": { "${m[1]}": "vite build" }`})],
+[/Expected: (\S+)\s+Received: (\S+)/,m=>({line:`Expected: ${m[1]}`,cause:`A test expected ${m[1]} but the code returned ${m[2]}. The logic is wrong, not the setup.`,fix:`Open the file named in the stack trace (tests/cart.test.js:12) and check how the total is calculated. A missed item or an off-by-one is the usual cause.`})]];
+const $=id=>document.getElementById(id);let last="";
+Object.keys(SAMPLES).forEach(k=>$("sample").add(new Option(k,k)));
+$("sample").onchange=()=>{$("log").value=SAMPLES[$("sample").value]};$("log").value=SAMPLES[$("sample").value];
+function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
+async function explain(){
+ const log=$("log").value.trim();if(!log){$("out").innerHTML="<p>Paste a log first.</p>";return}
+ $("say").textContent="Looking at the log…";let r=null;
+ try{const res=await fetch("/api/explain",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({log})});if(res.ok)r=await res.json()}catch(e){}
+ if(!r){for(const[re,f]of RULES){const m=log.match(re);if(m){r=f(m);break}}}
+ if(!r)r={line:"",cause:"I could not find a known error pattern in this log.",fix:"Paste more of the log, starting from the first red error line."};
+ $("out").innerHTML=`<h2>Cause</h2><div class="cause">${esc(r.cause)}</div><h2>Fix</h2><div class="fix"><pre>${esc(r.fix)}</pre></div>`;
+ const lv=$("logview");lv.hidden=false;$("logpre").innerHTML=log.split("\n").map(l=>r.line&&l.includes(r.line.split("\n")[0])?`<span class="bad">${esc(l)}</span>`:esc(l)).join("\n");
+ last=`${r.cause} ${r.fix}`;$("say").textContent="Here is what went wrong.";$("speak").hidden=false;speechSynthesis.speak(new SpeechSynthesisUtterance(last))}
+$("ask").onclick=explain;$("speak").onclick=()=>{speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(last))};
+$("mic").onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+ if(!SR){$("say").textContent="Voice input is not supported in this browser. Use Chrome, or tap the button.";return}
+ const r=new SR();r.lang="en-IN";$("say").textContent="Listening…";
+ r.onresult=e=>{$("say").textContent="“"+e.results[0][0].transcript+"”";explain()};r.onerror=()=>{$("say").textContent="Could not hear that. Try again."};r.start()};
+</script></body></html>
