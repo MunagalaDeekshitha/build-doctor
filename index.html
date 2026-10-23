@@ -21,6 +21,7 @@ pre{margin:0;font:13px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;
 .say{color:var(--mute);font-style:italic;min-height:1.5em}
 h2{font-size:1rem;margin:14px 0 4px}h2:first-of-type{margin-top:0}
 .fix{border-left:4px solid var(--ok);padding-left:10px}.cause{border-left:4px solid var(--fail);padding-left:10px}
+.tag{background:var(--hi);border-radius:99px;padding:2px 10px;font-size:.8rem;font-weight:600}.seen{color:var(--mute);font-size:.9rem;margin-top:4px}#hist{margin-top:14px;font-size:.9rem;color:var(--mute)}#clr{margin-top:6px;font-size:.8rem;padding:4px 8px}
 </style></head><body><main>
 <h1>Build Doctor</h1>
 <p class="sub">Ask why your build failed. Get the cause and the fix, spoken and on screen.</p>
@@ -35,18 +36,26 @@ h2{font-size:1rem;margin:14px 0 4px}h2:first-of-type{margin-top:0}
 <section class="card" aria-live="polite">
 <div class="say" id="say">Say or tap: “Why did my build fail?”</div>
 <div id="out"><p>Pick a sample log or paste your own, then ask.</p></div>
-<div class="row"><button id="speak" hidden>Read aloud</button></div>
+<div class="row"><button id="speak" hidden>Read aloud</button><button id="copy" hidden>Copy fix</button></div><div id="hist"></div>
 </section></div></main>
 <script>
 const SAMPLES={
 "Python: missing module":`Run pytest\n============ test session starts ============\ncollected 0 items / 1 error\nImportError while importing tests/test_api.py\nE   ModuleNotFoundError: No module named 'requests'\nError: Process completed with exit code 2.`,
 "Node: missing build script":`Run npm run build\nnpm ERR! Missing script: "build"\nnpm ERR! To see a list of scripts, run: npm run\nError: Process completed with exit code 1.`,
-"Test: wrong total":`Run npm test\nFAIL tests/cart.test.js\n  ● cart total adds items\n    expect(received).toBe(expected)\n    Expected: 5\n    Received: 4\n      at Object.<anonymous> (tests/cart.test.js:12:30)\nError: Process completed with exit code 1.`};
+"Test: wrong total":`Run npm test\nFAIL tests/cart.test.js\n  ● cart total adds items\n    expect(received).toBe(expected)\n    Expected: 5\n    Received: 4\n      at Object.<anonymous> (tests/cart.test.js:12:30)\nError: Process completed with exit code 1.`,
+"Docker: image not found":`Run docker build -t app .\nStep 1/5 : FROM pyton:3.11\npull access denied for pyton, repository does not exist or may require authentication\nError: Process completed with exit code 1.`,
+"Maven: compile error":`Run mvn package\n[ERROR] COMPILATION ERROR :\n[ERROR] /src/main/java/App.java:[8,20] cannot find symbol\n[ERROR]   symbol:   variable nme\nError: Process completed with exit code 1.`,
+"Network: install timeout":`Run npm install\nnpm ERR! code ETIMEDOUT\nnpm ERR! network request to https://registry.npmjs.org/react failed, reason: connect ETIMEDOUT\nError: Process completed with exit code 1.`};
 const RULES=[
-[/ModuleNotFoundError: No module named '(\w+)'/,m=>({line:m[0],cause:`The code imports "${m[1]}" but the build never installed it.`,fix:`Add ${m[1]} to requirements.txt, then make sure the workflow runs: pip install -r requirements.txt`})],
-[/Missing script: "(\w+)"/,m=>({line:m[0],cause:`package.json has no "${m[1]}" script, so npm cannot run it.`,fix:`Add it under "scripts" in package.json, for example:\n"scripts": { "${m[1]}": "vite build" }`})],
-[/Expected: (\S+)\s+Received: (\S+)/,m=>({line:`Expected: ${m[1]}`,cause:`A test expected ${m[1]} but the code returned ${m[2]}. The logic is wrong, not the setup.`,fix:`Open the file named in the stack trace (tests/cart.test.js:12) and check how the total is calculated. A missed item or an off-by-one is the usual cause.`})]];
-const $=id=>document.getElementById(id);let last="";
+[/ModuleNotFoundError: No module named '(\w+)'/,m=>({title:"Missing Python module",tag:"Quick fix",line:m[0],cause:`The code imports "${m[1]}" but the build never installed it.`,fix:`Add ${m[1]} to requirements.txt, then make sure the workflow runs: pip install -r requirements.txt`})],
+[/Missing script: "(\w+)"/,m=>({title:"Missing npm script",tag:"Quick fix",line:m[0],cause:`package.json has no "${m[1]}" script, so npm cannot run it.`,fix:`Add it under "scripts" in package.json, for example:\n"scripts": { "${m[1]}": "vite build" }`})],
+[/Expected: (\S+)\s+Received: (\S+)/,m=>({title:"Failing test",tag:"Needs code change",line:`Expected: ${m[1]}`,cause:`A test expected ${m[1]} but the code returned ${m[2]}. The logic is wrong, not the setup.`,fix:`Open the file in the stack trace (tests/cart.test.js:12) and check how the total is calculated. A missed item or an off-by-one is the usual cause.`})],
+[/pull access denied for ([\w.\/-]+)/,m=>({title:"Docker image not found",tag:"Quick fix",line:m[0],cause:`Docker cannot pull "${m[1]}". The image name is probably misspelled, or it is private.`,fix:`Check the name in your Dockerfile FROM line for typos. If the image is private, add a docker login step to the workflow.`})],
+[/cannot find symbol/,m=>({title:"Java compile error",tag:"Needs code change",line:m[0],cause:`Java cannot find a variable or method used in the code. It is usually a typo or a missing import.`,fix:`Open the file and line shown in the [ERROR] line above. Fix the spelling of the name or add the missing import.`})],
+[/'(\w+)' is (defined but never used|not defined)/,m=>({title:"Lint error",tag:"Quick fix",line:m[0],cause:`ESLint says "${m[1]}" is ${m[2]}. The build is set to fail on lint errors.`,fix:m[2]==="not defined"?`Declare or import ${m[1]} before using it.`:`Remove ${m[1]} if it is unused, or use it in the code.`})],
+[/Permission denied/,m=>({title:"Permission denied",tag:"Check settings",line:m[0],cause:`The build tried to run or write something it is not allowed to.`,fix:`For a script, run: chmod +x script.sh and commit it. For GitHub Actions, check the permissions: block in the workflow file.`})],
+[/ETIMEDOUT|timed out|exceeded the maximum execution time/,m=>({title:"Timeout",tag:"Check settings",line:m[0],cause:`A network request or the whole job took too long. This is often temporary or caused by a slow install.`,fix:`Re-run the job first. If it keeps happening, cache your dependencies in the workflow and add a retry.`})]];
+const $=id=>document.getElementById(id);let last="",fix="";
 Object.keys(SAMPLES).forEach(k=>$("sample").add(new Option(k,k)));
 $("sample").onchange=()=>{$("log").value=SAMPLES[$("sample").value]};$("log").value=SAMPLES[$("sample").value];
 function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
@@ -55,10 +64,16 @@ async function explain(){
  $("say").textContent="Looking at the log…";let r=null;
  try{const res=await fetch("/api/explain",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({log})});if(res.ok)r=await res.json()}catch(e){}
  if(!r){for(const[re,f]of RULES){const m=log.match(re);if(m){r=f(m);break}}}
- if(!r)r={line:"",cause:"I could not find a known error pattern in this log.",fix:"Paste more of the log, starting from the first red error line."};
- $("out").innerHTML=`<h2>Cause</h2><div class="cause">${esc(r.cause)}</div><h2>Fix</h2><div class="fix"><pre>${esc(r.fix)}</pre></div>`;
+ if(!r)r={title:"Unknown error",tag:"Needs a closer look",line:"",cause:"I could not find a known error pattern in this log.",fix:"Paste more of the log, starting from the first red error line."};
+ const n=remember(r);$("out").innerHTML=`<span class="tag">${esc(r.tag||"Check it")}</span> <b>${esc(r.title||"Build failure")}</b><div class="seen">${n>1?"You have seen this error "+n+" times on this device.":"First time seeing this error."}</div><h2>Cause</h2><div class="cause">${esc(r.cause)}</div><h2>Fix</h2><div class="fix"><pre>${esc(r.fix)}</pre></div>`;
  const lv=$("logview");lv.hidden=false;$("logpre").innerHTML=log.split("\n").map(l=>r.line&&l.includes(r.line.split("\n")[0])?`<span class="bad">${esc(l)}</span>`:esc(l)).join("\n");
- last=`${r.cause} ${r.fix}`;$("say").textContent="Here is what went wrong.";$("speak").hidden=false;speechSynthesis.speak(new SpeechSynthesisUtterance(last))}
+ last=`${r.cause} ${r.fix}`+(n>1?` You have seen this error ${n} times.`:"");fix=r.fix;$("copy").hidden=false;renderHist();$("say").textContent="Here is what went wrong.";$("speak").hidden=false;speechSynthesis.speak(new SpeechSynthesisUtterance(last))}
+function remember(r){const k=r.title||(r.line||"unknown").slice(0,40);try{const d=JSON.parse(localStorage.getItem("bd")||"{}");d[k]=(d[k]||0)+1;localStorage.setItem("bd",JSON.stringify(d));return d[k]}catch(e){return 1}}
+function renderHist(){try{const t=Object.entries(JSON.parse(localStorage.getItem("bd")||"{}")).sort((a,b)=>b[1]-a[1]).slice(0,3);
+ $("hist").innerHTML=t.length?"<b>Your most frequent failures</b><br>"+t.map(([k,v])=>esc(k)+" ×"+v).join("<br>")+'<br><button id="clr">Clear history</button>':"";
+ if(t.length)$("clr").onclick=()=>{localStorage.removeItem("bd");renderHist()}}catch(e){}}
+$("copy").onclick=async()=>{try{await navigator.clipboard.writeText(fix);$("copy").textContent="Copied!"}catch(e){$("copy").textContent="Copy failed"}setTimeout(()=>$("copy").textContent="Copy fix",1500)};
+renderHist();
 $("ask").onclick=explain;$("speak").onclick=()=>{speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(last))};
 $("mic").onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
  if(!SR){$("say").textContent="Voice input is not supported in this browser. Use Chrome, or tap the button.";return}
